@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
 from tkinter import simpledialog
+from tkinter import ttk
 import subprocess
 import threading
 import queue
@@ -8,6 +9,7 @@ import os
 import sys
 import json
 import urllib.request
+import fnmatch
 
 # --- Classe per l'applicazione GUI ---
 class BackupApp:
@@ -104,11 +106,19 @@ class BackupApp:
         tk.Button(exclude_button_frame, text="+", command=self.add_exclude_to_list).pack(fill=tk.X)
         tk.Button(exclude_button_frame, text="-", command=self.remove_exclude_from_list).pack(fill=tk.X, pady=5)
 
+        # Altri widget di stato e output
+        self.progress_frame = tk.Frame(main_frame)
+        self.progress_frame.pack(fill=tk.X, pady=5)
 
+        self.progress_label = tk.Label(self.progress_frame, text="Progresso: 0%")
+        self.progress_label.pack(side=tk.LEFT, padx=(0, 10))
 
-        # --- Altri widget di stato e output ---
+        self.progressbar = ttk.Progressbar(self.progress_frame, orient='horizontal', length=500, mode='determinate')
+        self.progressbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
         self.status_label = tk.Label(main_frame, text="Pronto.")
         self.status_label.pack(pady=5)
+        
         self.start_button = tk.Button(main_frame, text="Esegui Backup", command=self.start_backup)
         self.start_button.pack(pady=10)
         self.output_memo = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, height=15)
@@ -122,7 +132,7 @@ class BackupApp:
         else:
             self.status_label.config(text="Pronto. Nessun file di configurazione trovato all'avvio.")
 
-    # --- NOVITÀ: gestione lista esclusioni ---
+    # --- Gestione lista esclusioni ---
     def add_exclude_to_list(self):
         pattern = tk.simpledialog.askstring("Aggiungi esclusione", "Inserisci estensione/cartella da escludere (es: *.tmp o C:\\temp\\*):")
         if pattern:
@@ -133,7 +143,6 @@ class BackupApp:
         selected_indices = self.exclude_listbox.curselection()
         if selected_indices:
             self.exclude_listbox.delete(selected_indices[0])
-
 
     def show_license(self):
         """Mostra la finestra di dialogo della licenza."""
@@ -204,7 +213,7 @@ class BackupApp:
             return
         data = {
             "folders": list(self.folders_listbox.get(0, tk.END)),
-            "excludes": list(self.exclude_listbox.get(0, tk.END)),  # --- NOVITÀ ---
+            "excludes": list(self.exclude_listbox.get(0, tk.END)),
             "destination_folder": self.dest_entry.get(),
             "archive_name": self.archive_name_entry.get(),
             "rar_path": self.rar_path_entry.get()
@@ -230,16 +239,14 @@ class BackupApp:
         try:
             with open(file_path, 'r') as f:
                 data = json.load(f)
-            # Pulisce le liste e i campi di testo
             self.folders_listbox.delete(0, tk.END)
-            self.exclude_listbox.delete(0, tk.END)  # --- NOVITÀ ---
+            self.exclude_listbox.delete(0, tk.END)
             self.dest_entry.delete(0, tk.END)
             self.archive_name_entry.delete(0, tk.END)
             self.rar_path_entry.delete(0, tk.END)
-            # Popola i widget con i dati caricati
             for folder in data.get("folders", []):
                 self.folders_listbox.insert(tk.END, folder)
-            for pattern in data.get("excludes", []):  # --- NOVITÀ ---
+            for pattern in data.get("excludes", []):
                 self.exclude_listbox.insert(tk.END, pattern)
 
             self.dest_entry.insert(0, data.get("destination_folder", os.path.join(os.path.expanduser('~'), 'Backup')))
@@ -271,15 +278,22 @@ class BackupApp:
             self.folders_listbox.delete(selected_indices[0])
 
     def update_gui(self):
-        """Legge l'output dalla coda e aggiorna la Memo."""
         try:
             while True:
                 line = self.output_queue.get_nowait()
                 if line is None:
                     self.on_backup_complete()
                     break
-                self.output_memo.insert(tk.END, line)
-                self.output_memo.see(tk.END)
+
+                if line.startswith("progress:"):
+                    progress_value = int(line.split(':')[1])
+                    self.progressbar['value'] = progress_value
+                    self.progress_label.config(text=f"Progresso: {progress_value}%")
+                elif line.startswith("files_processed:"):
+                    self.status_label.config(text=f"Elaborazione: {line.split(':')[1].strip()} file")
+                else:
+                    self.output_memo.insert(tk.END, line)
+                    self.output_memo.see(tk.END)
         except queue.Empty:
             self.root.after(100, self.update_gui)
 
@@ -289,12 +303,39 @@ class BackupApp:
         self.start_button.config(state=tk.NORMAL)
         self.status_label.config(text="Backup completato! 🎉")
 
+    def pre_calculate_files(self, folders, excludes):
+        total_files = 0
+        try:
+            for folder in folders:
+                if os.path.exists(folder):
+                    for dirpath, dirnames, filenames in os.walk(folder):
+                        # Filtra i file basandosi sulle esclusioni
+                        filenames_filtered = [f for f in filenames if not self.is_excluded(f, excludes)]
+                        total_files += len(filenames_filtered)
+            return total_files
+        except Exception as e:
+            self.output_queue.put(f"Errore nel calcolo dei file: {e}\n")
+            return 0
+
+    def is_excluded(self, filename, excludes):
+        """Verifica se un file deve essere escluso in base ai pattern."""
+        for pattern in excludes:
+            if fnmatch.fnmatch(filename, pattern):
+                return True
+        return False
+
     def run_rar_command(self):
         """Esegue il comando rar in un thread separato."""
         try:
-            source_folders = self.folders_listbox.get(0, tk.END)
-            exclude_patterns = self.exclude_listbox.get(0, tk.END)  # --- NOVITÀ ---
-           
+            source_folders = list(self.folders_listbox.get(0, tk.END))
+            exclude_patterns = list(self.exclude_listbox.get(0, tk.END))
+
+            # Calcola il numero totale di file da elaborare
+            self.output_queue.put("Calcolo del numero totale di file...\n")
+            total_files = self.pre_calculate_files(source_folders, exclude_patterns)
+            files_processed = 0
+            self.output_queue.put(f"Trovati {total_files} file da archiviare.\n")
+            
             dest_folder = self.dest_entry.get()
             archive_name = self.archive_name_entry.get()
             rar_path = self.rar_path_entry.get().strip()
@@ -311,38 +352,41 @@ class BackupApp:
             backup_archive = os.path.join(dest_folder, archive_name)
             os.makedirs(dest_folder, exist_ok=True)
 
-            # Scegli il comando in base al percorso fornito dall'utente
             if rar_path and os.path.exists(rar_path):
                 command = [rar_path, 'a', '-u', '-r', backup_archive]
             else:
                 self.output_queue.put("Avviso: Percorso di RAR/WinRAR non valido o non specificato. Tentativo di usare 'rar' dal PATH di sistema.\n")
                 command = ['rar', 'a', '-u', '-r', backup_archive]
 
-            # --- NOVITÀ: aggiungo le esclusioni ---
             for pattern in exclude_patterns:
                 command.append(f"-x{pattern}")
-
+            
             command.extend(source_folders)
 
-            # Determina la codifica da usare
             if sys.platform == "win32":
-                # Su Windows, usa la codifica OEM (CP850) per l'output di RAR
                 output_encoding = 'cp850'
             else:
-                # Su altri sistemi, usa UTF-8
                 output_encoding = 'utf-8'
 
             process = subprocess.Popen(command,
                                        stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT,
-                                       text=False, # Imposta text=False per gestire la decodifica manualmente
+                                       text=False,
                                        cwd=os.path.expanduser('~'))
 
             for line in process.stdout:
                 try:
-                    # Decodifica la riga usando la codifica corretta
                     decoded_line = line.decode(output_encoding, errors='replace')
                     self.output_queue.put(decoded_line)
+
+                    # --- Logica di aggiornamento della progress bar ---
+                    if any(word in decoded_line for word in ["Aggiunta", "Adding", "Compressing", "Creating"]):
+                        files_processed += 1
+                        if total_files > 0:
+                            progress_percent = int((files_processed / total_files) * 100)
+                            self.output_queue.put(f"progress:{progress_percent}\n")
+                            self.output_queue.put(f"files_processed:{files_processed}/{total_files}\n")
+
                 except Exception as e:
                     self.output_queue.put(f"Errore di decodifica: {e}\n")
                     self.output_queue.put(line.decode('utf-8', errors='replace'))
@@ -365,7 +409,9 @@ class BackupApp:
         self.is_running = True
         self.start_button.config(state=tk.DISABLED)
         self.output_memo.delete('1.0', tk.END)
+        self.progressbar['value'] = 0
         self.status_label.config(text="Backup in corso...")
+        
         thread = threading.Thread(target=self.run_rar_command)
         thread.daemon = True
         thread.start()
