@@ -1,25 +1,43 @@
 import tkinter as tk
-from tkinter import scrolledtext, filedialog
+from tkinter import scrolledtext, filedialog, messagebox
 import subprocess
 import threading
 import queue
 import os
 import sys
 import json
+import urllib.request
 
 # --- Classe per l'applicazione GUI ---
 class BackupApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Backup con RAR")
-        self.root.geometry("700x550")
-        
+        self.root.geometry("700x600")
         self.is_running = False
         self.output_queue = queue.Queue()
-        
+
         # Variabili di stato dinamiche
         self.current_backup_file = "backup_config.rbak"
-        
+
+        # --- Creazione della barra dei menu ---
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # Menu File
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Salva Configurazione", command=self.save_backup_data)
+        file_menu.add_command(label="Carica Configurazione", command=self.load_backup_data)
+        file_menu.add_separator()
+        file_menu.add_command(label="Esci", command=self.root.quit)
+
+        # Menu Info
+        info_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Info", menu=info_menu)
+        info_menu.add_command(label="Licenza", command=self.show_license)
+        info_menu.add_command(label="About", command=self.show_about)
+
         # --- Frame principale per l'interfaccia utente ---
         main_frame = tk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -27,75 +45,117 @@ class BackupApp:
         # --- Sezione per il nome del backup ---
         self.backup_name_label = tk.Label(main_frame, text=f"File di configurazione: {self.current_backup_file}", font=("Arial", 12, "bold"))
         self.backup_name_label.pack(pady=5)
-        
-        # --- Sezione per i pulsanti di salvataggio/caricamento ---
-        save_load_frame = tk.Frame(main_frame)
-        save_load_frame.pack(pady=5)
-        
-        save_button = tk.Button(save_load_frame, text="Salva Backup", command=self.save_backup_data)
-        save_button.pack(side=tk.LEFT, padx=5)
-        
-        load_button = tk.Button(save_load_frame, text="Carica Backup", command=self.load_backup_data)
-        load_button.pack(side=tk.LEFT, padx=5)
+
+        # --- Sezione per il percorso di WinRAR/RAR ---
+        rar_path_frame = tk.LabelFrame(main_frame, text="Percorso di WinRAR/RAR")
+        rar_path_frame.pack(fill=tk.X, pady=5, padx=5)
+        self.rar_path_entry = tk.Entry(rar_path_frame)
+        self.rar_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        browse_rar_button = tk.Button(rar_path_frame, text="Trova Programma", command=self.browse_rar)
+        browse_rar_button.pack(side=tk.LEFT, padx=5)
+
+        # Imposta il percorso di default a seconda del sistema operativo
+        if sys.platform == "win32":
+            self.rar_path_entry.insert(0, "C:\\Program Files\\WinRAR\\WinRAR.exe")
+        elif sys.platform == "darwin": # macOS
+            self.rar_path_entry.insert(0, "/usr/local/bin/rar")
+        else: # Linux e altri
+            self.rar_path_entry.insert(0, "/usr/local/bin/rar")
 
         # --- Sezione per la destinazione del backup ---
         dest_frame = tk.LabelFrame(main_frame, text="Destinazione Backup")
         dest_frame.pack(fill=tk.X, pady=5, padx=5)
-
         self.dest_entry = tk.Entry(dest_frame)
         self.dest_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
-        
         browse_button = tk.Button(dest_frame, text="Trova Percorso", command=self.browse_destination)
         browse_button.pack(side=tk.LEFT, padx=5)
-        
+
         # Imposta la destinazione di default
         self.dest_entry.insert(0, os.path.join(os.path.expanduser('~'), 'Backup'))
-        
+
         # --- Sezione per il nome del file di backup ---
         file_frame = tk.LabelFrame(main_frame, text="Nome File Archivio")
         file_frame.pack(fill=tk.X, pady=5, padx=5)
-        
         self.archive_name_entry = tk.Entry(file_frame)
         self.archive_name_entry.pack(fill=tk.X, padx=5)
-
         # Imposta il nome dell'archivio di default
         self.archive_name_entry.insert(0, 'IlMioBackup.rar')
-        
+
         # --- Sezione per la selezione delle cartelle ---
         folders_frame = tk.LabelFrame(main_frame, text="Cartelle da salvare")
         folders_frame.pack(fill=tk.X, pady=5, padx=5)
-
         self.folders_listbox = tk.Listbox(folders_frame, selectmode=tk.SINGLE, height=5)
         self.folders_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         button_frame = tk.Frame(folders_frame)
         button_frame.pack(side=tk.RIGHT, padx=5)
-
         add_button = tk.Button(button_frame, text="+", command=self.add_folder_to_list)
         add_button.pack(fill=tk.X)
-
         remove_button = tk.Button(button_frame, text="-", command=self.remove_folder_from_list)
         remove_button.pack(fill=tk.X, pady=5)
-        
+
         # --- Altri widget di stato e output ---
         self.status_label = tk.Label(main_frame, text="Pronto.")
         self.status_label.pack(pady=5)
-
         self.start_button = tk.Button(main_frame, text="Esegui Backup", command=self.start_backup)
         self.start_button.pack(pady=10)
-
         self.output_memo = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, height=15)
         self.output_memo.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
 
         # --- Caricamento automatico della configurazione all'avvio ---
         script_dir = os.path.dirname(os.path.abspath(__file__))
         auto_load_file = os.path.join(script_dir, "backup_config.rbak")
-        
         if os.path.exists(auto_load_file):
             self.load_backup_data(file_path=auto_load_file)
         else:
             self.status_label.config(text="Pronto. Nessun file di configurazione trovato all'avvio.")
-            
+
+    def show_license(self):
+        """Mostra la finestra di dialogo della licenza."""
+        license_window = tk.Toplevel(self.root)
+        license_window.title("Licenza")
+        license_window.geometry("600x400")
+
+        text_area = scrolledtext.ScrolledText(license_window, wrap=tk.WORD)
+        text_area.pack(expand=True, fill="both", padx=10, pady=10)
+        text_area.insert(tk.END, "Caricamento della Licenza Pubblica di Mozilla (MPL-2.0)...")
+
+        def fetch_license_text():
+            try:
+                # URL della licenza MPL-2.0
+                url = "https://www.mozilla.org/media/MPL/2.0/index.815ca99b2447.txt"
+                with urllib.request.urlopen(url) as response:
+                    license_text = response.read().decode('utf-8')
+                text_area.delete('1.0', tk.END)
+                text_area.insert(tk.END, license_text)
+            except Exception as e:
+                text_area.delete('1.0', tk.END)
+                text_area.insert(tk.END, f"Errore durante il caricamento della licenza: {e}\n\n"
+                                        "Il programma è rilasciato sotto la Licenza Pubblica di Mozilla (MPL-2.0). "
+                                        "Puoi trovare il testo completo a questo indirizzo: "
+                                        "https://www.mozilla.org/en-US/MPL/2.0/")
+            finally:
+                text_area.config(state=tk.DISABLED)
+
+        threading.Thread(target=fetch_license_text, daemon=True).start()
+
+    def show_about(self):
+        """Mostra la finestra di dialogo 'About'."""
+        messagebox.showinfo(
+            "About",
+            "Autore: Vincenzo Scozzaro\n"
+            "Programma free sotto la licenza Mozilla"
+        )
+
+    def browse_rar(self):
+        """Apre una finestra di dialogo per selezionare il programma rar."""
+        selected_file = filedialog.askopenfilename(
+            title="Seleziona l'eseguibile di RAR o WinRAR",
+            filetypes=[("Eseguibili", "*.exe;*"), ("Tutti i file", "*.*")]
+        )
+        if selected_file:
+            self.rar_path_entry.delete(0, tk.END)
+            self.rar_path_entry.insert(0, selected_file)
+
     def browse_destination(self):
         """Apre una finestra di dialogo per selezionare la cartella di destinazione."""
         selected_path = filedialog.askdirectory(initialdir=self.dest_entry.get())
@@ -105,26 +165,29 @@ class BackupApp:
 
     def save_backup_data(self):
         """Salva la configurazione del backup in un file JSON."""
+        nome_senza_estensione, estensione = os.path.splitext(self.current_backup_file)
+        print(self.current_backup_file)
+        print(nome_senza_estensione)
+        print(estensione)
         file_path = filedialog.asksaveasfilename(
             defaultextension=".rbak",
             filetypes=[("RAR Backup", "*.rbak")],
-            initialfile=self.current_backup_file
+            initialfile=nome_senza_estensione
         )
         if not file_path:
             return
-
         data = {
             "folders": list(self.folders_listbox.get(0, tk.END)),
             "destination_folder": self.dest_entry.get(),
-            "archive_name": self.archive_name_entry.get()
+            "archive_name": self.archive_name_entry.get(),
+            "rar_path": self.rar_path_entry.get()
         }
-
         try:
             with open(file_path, 'w') as f:
                 json.dump(data, f, indent=4)
             self.current_backup_file = os.path.basename(file_path)
             self.backup_name_label.config(text=f"File di configurazione: {self.current_backup_file}")
-            self.status_label.config(text="Configurazione salvata con successo!")
+            self.status_label.config(text="Configurazione salvata con successo! 🎉")
         except Exception as e:
             self.status_label.config(text=f"Errore durante il salvataggio: {e}")
 
@@ -137,26 +200,23 @@ class BackupApp:
             )
             if not file_path:
                 return
-
         try:
             with open(file_path, 'r') as f:
                 data = json.load(f)
-            
             # Pulisce le liste e i campi di testo
             self.folders_listbox.delete(0, tk.END)
             self.dest_entry.delete(0, tk.END)
             self.archive_name_entry.delete(0, tk.END)
-            
+            self.rar_path_entry.delete(0, tk.END)
             # Popola i widget con i dati caricati
             for folder in data.get("folders", []):
                 self.folders_listbox.insert(tk.END, folder)
-            
             self.dest_entry.insert(0, data.get("destination_folder", os.path.join(os.path.expanduser('~'), 'Backup')))
             self.archive_name_entry.insert(0, data.get("archive_name", "IlMioBackup.rar"))
-
+            self.rar_path_entry.insert(0, data.get("rar_path", ""))
             self.current_backup_file = os.path.basename(file_path)
             self.backup_name_label.config(text=f"File di configurazione: {self.current_backup_file}")
-            self.status_label.config(text="Configurazione caricata con successo!")
+            self.status_label.config(text="Configurazione caricata con successo! 👍")
         except FileNotFoundError:
             self.status_label.config(text="Errore: File non trovato.")
         except json.JSONDecodeError:
@@ -191,7 +251,7 @@ class BackupApp:
                 self.output_memo.see(tk.END)
         except queue.Empty:
             self.root.after(100, self.update_gui)
-    
+
     def on_backup_complete(self):
         """Gestisce il completamento del backup."""
         self.is_running = False
@@ -204,39 +264,56 @@ class BackupApp:
             source_folders = self.folders_listbox.get(0, tk.END)
             dest_folder = self.dest_entry.get()
             archive_name = self.archive_name_entry.get()
-            
+            rar_path = self.rar_path_entry.get().strip()
+
             if not source_folders:
                 self.output_queue.put("Nessuna cartella selezionata per il backup.\n")
                 self.output_queue.put(None)
                 return
-            
             if not dest_folder or not archive_name:
                 self.output_queue.put("Specificare un percorso e un nome per l'archivio.\n")
                 self.output_queue.put(None)
                 return
-            
+
             backup_archive = os.path.join(dest_folder, archive_name)
-            
-            # Assicurati che la cartella di destinazione esista
             os.makedirs(dest_folder, exist_ok=True)
 
-            command = ['rar', 'a', '-u', '-r', backup_archive]
+            # Scegli il comando in base al percorso fornito dall'utente
+            if rar_path and os.path.exists(rar_path):
+                command = [rar_path, 'a', '-u', '-r', backup_archive]
+            else:
+                self.output_queue.put("Avviso: Percorso di RAR/WinRAR non valido o non specificato. Tentativo di usare 'rar' dal PATH di sistema.\n")
+                command = ['rar', 'a', '-u', '-r', backup_archive]
+
             command.extend(source_folders)
-            
-            process = subprocess.Popen(command, 
-                                       stdout=subprocess.PIPE, 
+
+            # Determina la codifica da usare
+            if sys.platform == "win32":
+                # Su Windows, usa la codifica OEM (CP850) per l'output di RAR
+                output_encoding = 'cp850'
+            else:
+                # Su altri sistemi, usa UTF-8
+                output_encoding = 'utf-8'
+
+            process = subprocess.Popen(command,
+                                       stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT,
-                                       text=True,
+                                       text=False, # Imposta text=False per gestire la decodifica manualmente
                                        cwd=os.path.expanduser('~'))
-            
+
             for line in process.stdout:
-                self.output_queue.put(line)
-            
+                try:
+                    # Decodifica la riga usando la codifica corretta
+                    decoded_line = line.decode(output_encoding, errors='replace')
+                    self.output_queue.put(decoded_line)
+                except Exception as e:
+                    self.output_queue.put(f"Errore di decodifica: {e}\n")
+                    self.output_queue.put(line.decode('utf-8', errors='replace'))
+
             process.wait()
             self.output_queue.put(None)
-            
         except FileNotFoundError:
-            error_msg = "ERRORE: Il comando 'rar' non è stato trovato.\n"
+            error_msg = "ERRORE: Il comando 'rar' non è stato trovato.\nAssicurati che sia installato e che il suo percorso sia corretto nel programma.\n"
             self.output_queue.put(error_msg)
             self.output_queue.put(None)
         except Exception as e:
@@ -248,16 +325,13 @@ class BackupApp:
         """Avvia il processo di backup in un nuovo thread."""
         if self.is_running:
             return
-
         self.is_running = True
         self.start_button.config(state=tk.DISABLED)
         self.output_memo.delete('1.0', tk.END)
         self.status_label.config(text="Backup in corso...")
-        
         thread = threading.Thread(target=self.run_rar_command)
         thread.daemon = True
         thread.start()
-        
         self.root.after(100, self.update_gui)
 
 # --- Esecuzione dell'applicazione ---
