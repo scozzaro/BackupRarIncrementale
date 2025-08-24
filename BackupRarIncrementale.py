@@ -288,7 +288,7 @@ class BackupApp:
                 if line.startswith("progress:"):
                     progress_value = int(line.split(':')[1])
                     self.progressbar['value'] = progress_value
-                    self.progress_label.config(text=f"Progresso: {progress_value}%")
+                    self.progress_label.config(text=f"Avanzamento: {progress_value}%")
                 elif line.startswith("files_processed:"):
                     self.status_label.config(text=f"Elaborazione: {line.split(':')[1].strip()} file")
                 else:
@@ -374,29 +374,28 @@ class BackupApp:
                                        text=False,
                                        cwd=os.path.expanduser('~'))
 
-            for line in process.stdout: 
+            for line in process.stdout:
                 try:
                     decoded_line = line.decode(output_encoding, errors='replace')
                     self.output_queue.put(decoded_line)
 
                     # --- Logica di aggiornamento della progress bar ---
-                    print(decoded_line)
                     if any(word in decoded_line for word in ["Aggiunta", "Updating", "Adding", "Compressing", "Creating"]):
                         files_processed += 1
                         if total_files > 0:
                             progress_percent = int((files_processed / total_files) * 100)
                             self.output_queue.put(f"progress:{progress_percent}\n")
                             self.output_queue.put(f"files_processed:{files_processed}/{total_files}\n")
-                    else:
-                        progress_percent = 100
-                        self.output_queue.put(f"progress:{progress_percent}\n")
-                        self.output_queue.put(f"files_processed:{files_processed}/{total_files}\n")
-
 
                 except Exception as e:
                     self.output_queue.put(f"Errore di decodifica: {e}\n")
                     self.output_queue.put(line.decode('utf-8', errors='replace'))
 
+            process.wait()
+
+            # Imposta la progress bar al 100% solo a backup completato
+            self.output_queue.put("progress:100\n") 
+            self.output_queue.put(None)
             process.wait()
             self.output_queue.put(None)
         except FileNotFoundError:
